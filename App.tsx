@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Image,
   Modal,
@@ -11,22 +11,11 @@ import {
 } from 'react-native';
 
 import { MapPicker } from './src/components/MapPicker';
-import { locations } from './src/data/locations';
+import { buildRoundSequence, getNextLocation } from './src/services/locationService';
 import { calculateHaversineDistanceKm, scoreFromDistance } from './src/utils/haversine';
 import { GuessPosition, Location, RoundResult } from './src/types/game';
 
-const TOTAL_ROUNDS = locations.length;
-
-function shuffleLocations(items: Location[]): Location[] {
-  const shuffled = [...items];
-
-  for (let index = shuffled.length - 1; index > 0; index -= 1) {
-    const randomIndex = Math.floor(Math.random() * (index + 1));
-    [shuffled[index], shuffled[randomIndex]] = [shuffled[randomIndex], shuffled[index]];
-  }
-
-  return shuffled;
-}
+const DEFAULT_ROUNDS = 4;
 
 function formatDistance(distanceKm: number): string {
   if (distanceKm < 1) {
@@ -37,22 +26,61 @@ function formatDistance(distanceKm: number): string {
 }
 
 export default function App() {
-  const [roundSequence] = useState<Location[]>(() => shuffleLocations(locations));
+  const [roundSequence, setRoundSequence] = useState<Location[]>([]);
   const [roundIndex, setRoundIndex] = useState(0);
   const [selectedGuess, setSelectedGuess] = useState<GuessPosition | null>(null);
   const [result, setResult] = useState<RoundResult | null>(null);
   const [totalScore, setTotalScore] = useState(0);
   const [isResultVisible, setIsResultVisible] = useState(false);
-  const [statusMessage, setStatusMessage] = useState('Escolha um ponto no mapa');
+  const [statusMessage, setStatusMessage] = useState('A carregar locais...');
+  const [isLoading, setIsLoading] = useState(true);
+
+  const totalRounds = Math.max(roundSequence.length, DEFAULT_ROUNDS);
 
   const currentLocation = roundSequence[roundIndex];
-  const isLastRound = roundIndex === roundSequence.length - 1;
+  const isLastRound = roundIndex === Math.max(roundSequence.length - 1, 0);
   const mapKey = `map-${roundIndex}`;
 
   const roundLabel = useMemo(
-    () => `Ronda ${roundIndex + 1}/${TOTAL_ROUNDS}`,
-    [roundIndex]
+    () => `Ronda ${Math.min(roundIndex + 1, totalRounds)}/${totalRounds}`,
+    [roundIndex, totalRounds]
   );
+
+  const loadRoundSequence = async (historyIds: string[] = []) => {
+    setIsLoading(true);
+    try {
+      const sequence = await buildRoundSequence(DEFAULT_ROUNDS, historyIds);
+      setRoundSequence(sequence);
+      setRoundIndex(0);
+      setResult(null);
+      setSelectedGuess(null);
+      setIsResultVisible(false);
+      setStatusMessage('Escolha um ponto no mapa');
+    } catch (error) {
+      console.warn('Não foi possível preparar a sequência de rondas:', error);
+      setStatusMessage('Erro ao carregar locais; usando fallback local.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const bootstrapGame = async () => {
+      if (!isMounted) {
+        return;
+      }
+
+      await loadRoundSequence();
+    };
+
+    void bootstrapGame();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   const resetRoundState = () => {
     setSelectedGuess(null);
@@ -62,12 +90,11 @@ export default function App() {
   };
 
   const handleGuessConfirm = () => {
-    if (!selectedGuess) {
+    if (!selectedGuess || !currentLocation) {
       setStatusMessage('Primeiro escolha um ponto no mapa.');
       return;
     }
 
-    // Aplicação direta da fórmula de Haversine para obter a distância real em km.
     const distanceKm = calculateHaversineDistanceKm(
       currentLocation.latitude,
       currentLocation.longitude,
@@ -84,19 +111,39 @@ export default function App() {
     setStatusMessage(`${currentLocation.label} • ${formatDistance(distanceKm)}`);
   };
 
-  const handleNextRound = () => {
+  const advanceToNextRound = async () => {
+    if (!currentLocation) {
+      return;
+    }
+
     if (roundIndex < roundSequence.length - 1) {
+      const usedIds = roundSequence.map((location) => location.id);
+      const nextLocation = await getNextLocation(usedIds);
+
+      setRoundSequence((previousSequence) => {
+        const nextSequence = [...previousSequence];
+        nextSequence[roundIndex + 1] = nextLocation;
+        return nextSequence;
+      });
+
       setRoundIndex((previousIndex) => previousIndex + 1);
       resetRoundState();
       return;
     }
 
-    // Reinício do jogo ao terminar as rondas disponíveis.
-    setRoundIndex(0);
+    await loadRoundSequence();
     setTotalScore(0);
-    setStatusMessage('Jogo reiniciado');
-    resetRoundState();
   };
+
+  if (isLoading || !currentLocation) {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <View style={styles.loadingContainer}>
+          <Text style={styles.loadingText}>A carregar locais...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -150,19 +197,9 @@ export default function App() {
 
             <Pressable
               style={styles.primaryButton}
-              onPress={() => {
-                if (isLastRound) {
-                  setRoundIndex(0);
-                  setTotalScore(0);
-                  setStatusMessage('Novo jogo iniciado');
-                  resetRoundState();
-                  setIsResultVisible(false);
-                  return;
-                }
-
-                setRoundIndex((previousIndex) => previousIndex + 1);
-                resetRoundState();
+              onPress={async () => {
                 setIsResultVisible(false);
+                await advanceToNextRound();
               }}
             >
               <Text style={styles.primaryButtonText}>
@@ -180,6 +217,17 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: '#07131d'
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#07131d'
+  },
+  loadingText: {
+    color: '#eaf9ff',
+    fontSize: 18,
+    fontWeight: '700'
   },
   container: {
     flex: 1,
