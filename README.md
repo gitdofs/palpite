@@ -1,0 +1,2 @@
+# palpite
+Semelhante ao Geoguessr
