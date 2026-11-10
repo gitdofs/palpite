@@ -7,11 +7,103 @@ import { GuessPosition } from '../types/game';
 interface MapPickerProps {
   onLocationPick: (guess: GuessPosition) => void;
   mapKey: string;
+  guessPosition: GuessPosition | null;
+  answerPosition: GuessPosition | null;
 }
 
-export function MapPicker({ onLocationPick, mapKey }: MapPickerProps) {
+export function MapPicker({ onLocationPick, mapKey, guessPosition, answerPosition }: MapPickerProps) {
   const isWeb = Platform.OS === 'web';
-  const [webGuess, setWebGuess] = useState<GuessPosition>({ latitude: 0, longitude: 0 });
+  const [mapSize, setMapSize] = useState({ width: 0, height: 0 });
+  const isRevealed = Boolean(guessPosition && answerPosition);
+
+  const resultLayers =
+    guessPosition && answerPosition
+      ? `
+        const guess = [${guessPosition.latitude}, ${guessPosition.longitude}];
+        const answer = [${answerPosition.latitude}, ${answerPosition.longitude}];
+
+        L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', {
+          maxZoom: 18,
+          minZoom: 2,
+          attribution: 'Tiles &copy; Esri'
+        }).addTo(map);
+        L.polyline([guess, answer], { color: '#f5c451', weight: 4, opacity: 0.95 }).addTo(map);
+        L.circleMarker(guess, {
+          radius: 8,
+          color: '#ffffff',
+          weight: 2,
+          fillColor: '#ff6b6b',
+          fillOpacity: 1
+        }).addTo(map).bindTooltip('Seu palpite', { permanent: true, direction: 'top' });
+        L.circleMarker(answer, {
+          radius: 8,
+          color: '#ffffff',
+          weight: 2,
+          fillColor: '#22b573',
+          fillOpacity: 1
+        }).addTo(map).bindTooltip('Local correto', { permanent: true, direction: 'top' });
+        map.fitBounds(L.latLngBounds([guess, answer]).pad(0.35), { maxZoom: 5 });
+      `
+      : '';
+
+  const sourceHtml = useMemo(() => {
+    return `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+          <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+          <style>
+            html, body, #map {
+              margin: 0;
+              padding: 0;
+              width: 100%;
+              height: 100%;
+              background: #dfeaf0;
+            }
+            body {
+              overflow: hidden;
+            }
+          </style>
+        </head>
+        <body>
+          <div id="map"></div>
+          <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+          <script>
+            const map = L.map('map', {
+              zoomControl: false,
+              attributionControl: true,
+              worldCopyJump: true
+            }).setView([20, 0], 2);
+
+            L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+              maxZoom: 18,
+              minZoom: 2,
+              attribution: 'Tiles &copy; Esri'
+            }).addTo(map);
+
+            ${resultLayers || `
+              let marker = null;
+
+              map.on('click', function(event) {
+                const { lat, lng } = event.latlng;
+
+                if (marker) {
+                  map.removeLayer(marker);
+                }
+
+                marker = L.marker([lat, lng]).addTo(map);
+
+                const payload = JSON.stringify({ type: 'mapTap', latitude: lat, longitude: lng });
+                window.ReactNativeWebView.postMessage(payload);
+              });
+            `}
+          </script>
+        </body>
+      </html>
+    `;
+  }, [resultLayers]);
 
   // Fallback visual e interativo para o navegador, já que o WebView nativo não é suportado em web.
   if (isWeb) {
@@ -28,15 +120,38 @@ export function MapPicker({ onLocationPick, mapKey }: MapPickerProps) {
       const latitude = 90 - yRatio * 180;
       const nextGuess = { latitude, longitude };
 
-      setWebGuess(nextGuess);
       onLocationPick(nextGuess);
     };
 
-    const markerLeft = `${((webGuess.longitude + 180) / 360) * 100}%`;
-    const markerTop = `${((90 - webGuess.latitude) / 180) * 100}%`;
+    const getMarkerPosition = (position: GuessPosition) => ({
+      left: `${((position.longitude + 180) / 360) * 100}%`,
+      top: `${((90 - position.latitude) / 180) * 100}%`
+    });
+
+    const guessMarkerPosition = guessPosition ? getMarkerPosition(guessPosition) : null;
+    const answerMarkerPosition = answerPosition ? getMarkerPosition(answerPosition) : null;
+    const guessX = guessPosition ? ((guessPosition.longitude + 180) / 360) * mapSize.width : 0;
+    const guessY = guessPosition ? ((90 - guessPosition.latitude) / 180) * mapSize.height : 0;
+    const answerX = answerPosition ? ((answerPosition.longitude + 180) / 360) * mapSize.width : 0;
+    const answerY = answerPosition ? ((90 - answerPosition.latitude) / 180) * mapSize.height : 0;
+    const lineLength = Math.hypot(answerX - guessX, answerY - guessY);
+    const lineStyle = {
+      left: (guessX + answerX - lineLength) / 2,
+      top: (guessY + answerY - 2) / 2,
+      width: lineLength,
+      transform: [{ rotate: `${Math.atan2(answerY - guessY, answerX - guessX)}rad` }]
+    };
 
     return (
-      <Pressable style={styles.webMap} onPress={handleWebTap}>
+      <Pressable
+        style={styles.webMap}
+        onPress={handleWebTap}
+        onLayout={(event) => {
+          const { width, height } = event.nativeEvent.layout;
+          setMapSize({ width, height });
+        }}
+        disabled={isRevealed}
+      >
         <View style={styles.webMapGlow} />
         <View style={styles.webGrid} />
         <View style={styles.webReferenceGrid} pointerEvents="none" />
@@ -79,79 +194,41 @@ export function MapPicker({ onLocationPick, mapKey }: MapPickerProps) {
           <Text style={styles.webAxisLabel}>-180°</Text>
         </View>
 
-        <View
-          style={[styles.webMarker, { left: markerLeft, top: markerTop, marginLeft: -14, marginTop: -14 }]}
-          pointerEvents="none"
-        >
-          <View style={styles.webMarkerDot} />
-        </View>
+        {isRevealed && mapSize.width > 0 ? (
+          <View style={[styles.webResultLine, lineStyle]} pointerEvents="none" />
+        ) : null}
 
-        <View style={styles.webCoordinatesBox} pointerEvents="none">
-          <Text style={styles.webCoordinatesText}>Lat: {webGuess.latitude.toFixed(2)}°</Text>
-          <Text style={styles.webCoordinatesText}>Lng: {webGuess.longitude.toFixed(2)}°</Text>
-        </View>
+        {guessPosition && guessMarkerPosition ? (
+          <View
+            style={[styles.webMarker, guessMarkerPosition, { marginLeft: -14, marginTop: -14 }]}
+            pointerEvents="none"
+          >
+            <View style={styles.webMarkerDot} />
+          </View>
+        ) : null}
 
-        <Text style={styles.webHint}>Clique para escolher um ponto</Text>
+        {answerPosition && answerMarkerPosition ? (
+          <View
+            style={[styles.webAnswerMarker, answerMarkerPosition, { marginLeft: -14, marginTop: -14 }]}
+            pointerEvents="none"
+          >
+            <View style={styles.webAnswerMarkerDot} />
+          </View>
+        ) : null}
+
+        {guessPosition ? (
+          <View style={styles.webCoordinatesBox} pointerEvents="none">
+            <Text style={styles.webCoordinatesText}>Lat: {guessPosition.latitude.toFixed(2)}°</Text>
+            <Text style={styles.webCoordinatesText}>Lng: {guessPosition.longitude.toFixed(2)}°</Text>
+          </View>
+        ) : null}
+
+        <Text style={styles.webHint}>
+          {isRevealed ? 'Palpite e localização correta' : 'Clique para escolher um ponto'}
+        </Text>
       </Pressable>
     );
   }
-
-  // Gera o HTML do mapa usando Leaflet via CDN no ambiente nativo móvel.
-  const sourceHtml = useMemo(() => {
-    return `
-      <!DOCTYPE html>
-      <html>
-        <head>
-          <meta charset="utf-8" />
-          <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-          <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-          <style>
-            html, body, #map {
-              margin: 0;
-              padding: 0;
-              width: 100%;
-              height: 100%;
-              background: #dfeaf0;
-            }
-            body {
-              overflow: hidden;
-            }
-          </style>
-        </head>
-        <body>
-          <div id="map"></div>
-          <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-          <script>
-            const map = L.map('map', {
-              zoomControl: false,
-              attributionControl: false,
-              worldCopyJump: true
-            }).setView([20, 0], 2);
-
-            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-              maxZoom: 18,
-              minZoom: 2
-            }).addTo(map);
-
-            let marker = null;
-
-            map.on('click', function(event) {
-              const { lat, lng } = event.latlng;
-
-              if (marker) {
-                map.removeLayer(marker);
-              }
-
-              marker = L.marker([lat, lng]).addTo(map);
-
-              const payload = JSON.stringify({ type: 'mapTap', latitude: lat, longitude: lng });
-              window.ReactNativeWebView.postMessage(payload);
-            });
-          </script>
-        </body>
-      </html>
-    `;
-  }, []);
 
   const handleMessage = (event: WebViewMessageEvent) => {
     try {
@@ -378,6 +455,31 @@ const styles = StyleSheet.create({
     backgroundColor: '#ff6b6b',
     borderWidth: 3,
     borderColor: '#fff'
+  },
+  webAnswerMarker: {
+    position: 'absolute',
+    width: 28,
+    height: 28,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 16,
+    backgroundColor: 'rgba(34, 181, 115, 0.18)',
+    zIndex: 4
+  },
+  webAnswerMarkerDot: {
+    width: 14,
+    height: 14,
+    borderRadius: 10,
+    backgroundColor: '#22b573',
+    borderWidth: 3,
+    borderColor: '#fff'
+  },
+  webResultLine: {
+    position: 'absolute',
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#f5c451',
+    zIndex: 3
   },
   webCoordinatesBox: {
     position: 'absolute',

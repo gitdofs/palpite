@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   Image,
-  Modal,
   Pressable,
   SafeAreaView,
   StatusBar,
@@ -11,7 +10,7 @@ import {
 } from 'react-native';
 
 import { MapPicker } from './src/components/MapPicker';
-import { buildRoundSequence, getNextLocation } from './src/services/locationService';
+import { buildRoundSequence } from './src/services/locationService';
 import { calculateHaversineDistanceKm, scoreFromDistance } from './src/utils/haversine';
 import { GuessPosition, Location, RoundResult } from './src/types/game';
 
@@ -27,11 +26,11 @@ function formatDistance(distanceKm: number): string {
 
 export default function App() {
   const [roundSequence, setRoundSequence] = useState<Location[]>([]);
+  const [playedLocationIds, setPlayedLocationIds] = useState<string[]>([]);
   const [roundIndex, setRoundIndex] = useState(0);
   const [selectedGuess, setSelectedGuess] = useState<GuessPosition | null>(null);
   const [result, setResult] = useState<RoundResult | null>(null);
   const [totalScore, setTotalScore] = useState(0);
-  const [isResultVisible, setIsResultVisible] = useState(false);
   const [statusMessage, setStatusMessage] = useState('A carregar locais...');
   const [isLoading, setIsLoading] = useState(true);
 
@@ -46,15 +45,15 @@ export default function App() {
     [roundIndex, totalRounds]
   );
 
-  const loadRoundSequence = async (historyIds: string[] = []) => {
+  const loadRoundSequence = async (historyIds: string[] = playedLocationIds) => {
     setIsLoading(true);
     try {
       const sequence = await buildRoundSequence(DEFAULT_ROUNDS, historyIds);
       setRoundSequence(sequence);
+      setPlayedLocationIds([...historyIds, ...sequence.map((location) => location.id)]);
       setRoundIndex(0);
       setResult(null);
       setSelectedGuess(null);
-      setIsResultVisible(false);
       setStatusMessage('Escolha um ponto no mapa');
     } catch (error) {
       console.warn('Não foi possível preparar a sequência de rondas:', error);
@@ -85,7 +84,6 @@ export default function App() {
   const resetRoundState = () => {
     setSelectedGuess(null);
     setResult(null);
-    setIsResultVisible(false);
     setStatusMessage('Escolha um ponto no mapa');
   };
 
@@ -107,8 +105,7 @@ export default function App() {
 
     setResult(finalResult);
     setTotalScore((previousScore) => previousScore + points);
-    setIsResultVisible(true);
-    setStatusMessage(`${currentLocation.label} • ${formatDistance(distanceKm)}`);
+    setStatusMessage(`${currentLocation.label} • ${formatDistance(distanceKm)} • ${points} pts`);
   };
 
   const advanceToNextRound = async () => {
@@ -117,21 +114,12 @@ export default function App() {
     }
 
     if (roundIndex < roundSequence.length - 1) {
-      const usedIds = roundSequence.map((location) => location.id);
-      const nextLocation = await getNextLocation(usedIds);
-
-      setRoundSequence((previousSequence) => {
-        const nextSequence = [...previousSequence];
-        nextSequence[roundIndex + 1] = nextLocation;
-        return nextSequence;
-      });
-
       setRoundIndex((previousIndex) => previousIndex + 1);
       resetRoundState();
       return;
     }
 
-    await loadRoundSequence();
+    await loadRoundSequence(playedLocationIds);
     setTotalScore(0);
   };
 
@@ -157,58 +145,37 @@ export default function App() {
           </View>
 
           <View style={styles.imageCard}>
-            <Image source={{ uri: currentLocation.imageUrl }} style={styles.image} resizeMode="cover" />
+            <Image
+              key={currentLocation.id}
+              source={{ uri: currentLocation.imageUrl }}
+              style={styles.image}
+              resizeMode="cover"
+            />
             <View style={styles.imageGradient} />
             <Text style={styles.locationLabel}>{currentLocation.label}</Text>
           </View>
         </View>
 
         <View style={styles.mapSection}>
-          <MapPicker key={mapKey} onLocationPick={setSelectedGuess} mapKey={mapKey} />
+          <MapPicker
+            key={mapKey}
+            onLocationPick={setSelectedGuess}
+            mapKey={mapKey}
+            guessPosition={selectedGuess}
+            answerPosition={result ? currentLocation : null}
+          />
 
           <View style={styles.pinHint}>
             <Text style={styles.hintText}>{statusMessage}</Text>
           </View>
 
-          <Pressable
-            style={[styles.confirmButton, result ? styles.confirmButtonDisabled : null]}
-            disabled={Boolean(result)}
-            onPress={handleGuessConfirm}
-          >
-            <Text style={styles.confirmButtonText}>Confirmar Palpite</Text>
+          <Pressable style={styles.confirmButton} onPress={result ? advanceToNextRound : handleGuessConfirm}>
+            <Text style={styles.confirmButtonText}>
+              {result ? (isLastRound ? 'Jogar de Novo' : 'Avançar para a Próxima Ronda') : 'Confirmar Palpite'}
+            </Text>
           </Pressable>
         </View>
       </View>
-
-      <Modal transparent animationType="slide" visible={isResultVisible}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Resultado da ronda</Text>
-
-            {result ? (
-              <>
-                <Text style={styles.metricLabel}>Distância</Text>
-                <Text style={styles.metricValue}>{formatDistance(result.distanceKm)}</Text>
-
-                <Text style={styles.metricLabel}>Pontuação</Text>
-                <Text style={styles.metricValue}>{result.points} pts</Text>
-              </>
-            ) : null}
-
-            <Pressable
-              style={styles.primaryButton}
-              onPress={async () => {
-                setIsResultVisible(false);
-                await advanceToNextRound();
-              }}
-            >
-              <Text style={styles.primaryButtonText}>
-                {isLastRound ? 'Jogar de Novo' : 'Avançar para a Próxima Ronda'}
-              </Text>
-            </Pressable>
-          </View>
-        </View>
-      </Modal>
     </SafeAreaView>
   );
 }
@@ -327,56 +294,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center'
   },
-  confirmButtonDisabled: {
-    opacity: 0.55
-  },
   confirmButtonText: {
     color: '#06161f',
     fontSize: 16,
     fontWeight: '800'
   },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(2, 8, 12, 0.72)',
-    justifyContent: 'center',
-    paddingHorizontal: 24
-  },
-  modalCard: {
-    backgroundColor: '#0b1d2a',
-    borderRadius: 24,
-    padding: 22,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)'
-  },
-  modalTitle: {
-    color: '#edfaff',
-    fontSize: 22,
-    fontWeight: '800',
-    marginBottom: 18
-  },
-  metricLabel: {
-    color: '#89a6b8',
-    fontSize: 12,
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-    marginTop: 10
-  },
-  metricValue: {
-    color: '#f5fdff',
-    fontSize: 28,
-    fontWeight: '800',
-    marginTop: 5
-  },
-  primaryButton: {
-    backgroundColor: '#69d6ff',
-    borderRadius: 14,
-    paddingVertical: 14,
-    marginTop: 22,
-    alignItems: 'center'
-  },
-  primaryButtonText: {
-    color: '#07131d',
-    fontSize: 15,
-    fontWeight: '800'
-  }
 });
